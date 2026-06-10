@@ -4,6 +4,11 @@ from cbpi.api import *
 import time
 from cbpi.controller.step_controller import StepController
 import re
+try:
+    import RPi.GPIO as GPIO
+    GPIO_AVAILABLE = True
+except ImportError:
+    GPIO_AVAILABLE = False
 from cbpi.api.dataclasses import NotificationType
 
 
@@ -23,7 +28,9 @@ from cbpi.api.dataclasses import NotificationType
              Property.Number(label="Rest_Interval", configurable=True, default_value=600,
                              description="Rest the pump after this many seconds during the mash."),
              Property.Number(label="Rest_Time", configurable=True, default_value=60,
-                             description="Rest the pump for this many seconds every rest interval.")])
+                             description="Rest the pump for this many seconds every rest interval."),
+             Property.Number(label="Burner_Failure_GPIO", configurable=True, default_value=-1,
+                             description="GPIO pin to monitor for burner failure (high signal = burner stopped). -1 to disable.")])
 class BM_PID_SmartBoilWithPump(CBPiKettleLogic):
 
     def __init__(self, cbpi, id, props):
@@ -33,6 +40,7 @@ class BM_PID_SmartBoilWithPump(CBPiKettleLogic):
         self.work_time, self.rest_time, self.max_output_boil = None, None, None
         self.max_boil_temp, self.max_pid_temp, self.max_pump_temp = None, None, None
         self.kettle, self.heater, self.agitator = None, None, None
+        self.burner_failure_gpio = -1
 
         self.old_temp = 0
 
@@ -41,6 +49,12 @@ class BM_PID_SmartBoilWithPump(CBPiKettleLogic):
     async def on_stop(self):
         # ensure to switch also pump off when logic stops
         await self.actor_off(self.agitator)
+        # cleanup GPIO if monitoring burner
+        if self.burner_failure_gpio >= 0 and GPIO_AVAILABLE:
+            try:
+                GPIO.cleanup(self.burner_failure_gpio)
+            except:
+                pass
 
     async def get_activity(self):
         active_step = None
@@ -54,6 +68,21 @@ class BM_PID_SmartBoilWithPump(CBPiKettleLogic):
            pass 
 
         return active_step
+
+    # subroutine that monitors burner failure via GPIO pin
+    async def burner_failure_monitor(self):
+        while self.running:
+            try:
+                pin_state = GPIO.input(self.burner_failure_gpio)
+                if pin_state == GPIO.HIGH:
+                    logging.error("BURNER FAILURE DETECTED on GPIO pin {}! Stopping controller.".format(self.burner_failure_gpio))
+                    self._logger.error("Burner failure detected via GPIO pin {}".format(self.burner_failure_gpio))
+                    self.running = False
+                    break
+            except Exception as e:
+                logging.error("Error reading GPIO pin {}: {}".format(self.burner_failure_gpio, e))
+                break
+            await asyncio.sleep(1)
 
     # subroutine that controlls pump aue and ump stop if max pump temp is reached
     async def pump_control(self):
@@ -177,8 +206,24 @@ class BM_PID_SmartBoilWithPump(CBPiKettleLogic):
 
             logging.info("CustomLogic P:{} I:{} D:{} {} {}".format(p, i, d, self.kettle, self.heater))
 
+            # Setup GPIO monitoring for burner failure if enabled
+            self.burner_failure_gpio = int(self.props.get("Burner_Failure_GPIO", -1))
+            if self.burner_failure_gpio >= 0 and GPIO_AVAILABLE:
+                try:
+                    GPIO.setmode(GPIO.BCM)
+                    GPIO.setup(self.burner_failure_gpio, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+                    logging.info("Burner failure GPIO monitoring enabled on pin {}".format(self.burner_failure_gpio))
+                except Exception as e:
+                    logging.error("Failed to setup GPIO pin {}: {}".format(self.burner_failure_gpio, e))
+                    self.burner_failure_gpio = -1
+            elif self.burner_failure_gpio >= 0 and not GPIO_AVAILABLE:
+                logging.warning("RPi.GPIO not available, burner failure detection disabled")
+                self.burner_failure_gpio = -1
+
             pump_controller = asyncio.create_task(self.pump_control())
             temp_controller = asyncio.create_task(self.temp_control())
+            if self.burner_failure_gpio >= 0:
+                burner_monitor = asyncio.create_task(self.burner_failure_monitor())
 
             await pump_controller
             await temp_controller
