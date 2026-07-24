@@ -9,7 +9,6 @@ try:
     GPIO_AVAILABLE = True
 except ImportError:
     GPIO_AVAILABLE = False
-from cbpi.api.dataclasses import NotificationType
 
 
 @parameters([Property.Number(label="P", configurable=True, default_value=117.0795, description="P Value of PID"),
@@ -41,8 +40,6 @@ class BM_PID_SmartBoilWithPump(CBPiKettleLogic):
         self.max_boil_temp, self.max_pid_temp, self.max_pump_temp = None, None, None
         self.kettle, self.heater, self.agitator = None, None, None
         self.burner_failure_gpio = -1
-
-        self.old_temp = 0
 
         self.controller : StepController = cbpi.step
 
@@ -149,13 +146,7 @@ class BM_PID_SmartBoilWithPump(CBPiKettleLogic):
         while self.running:
             current_kettle_power= self.heater_actor.power
             # get current temperature
-            ignore_until = getattr(self.cbpi, "ignition_ignore_until", 0)
-            if time.time() < ignore_until:
-                self.cbpi.notify("SmartBoilWithPump", "Ignoring temperature sensor during ignition", NotificationType.WARNING)
-                sensor_value = current_temp = old_temp
-            else:
-                sensor_value = current_temp = self.get_sensor_value(self.kettle.sensor).get("value")
-                old_temp = current_temp
+            sensor_value = current_temp = self.get_sensor_value(self.kettle.sensor).get("value")
             # get the current target temperature for the kettle
             target_temp = self.get_kettle_target_temp(self.id)
             # if current temperature is higher the defined boil temp, use fixed heating percent instead of PID values for controlled boiling
